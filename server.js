@@ -6,7 +6,7 @@ const app = express();
 app.use(express.static('public'));
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, pingInterval: 25000 });
 
 // ========== 游戏常量 ==========
 const MAP_W = 60;          // 地图格子宽
@@ -70,7 +70,9 @@ function getPlayer(ws) {
 function broadcast(room, msg) {
   const data = JSON.stringify(msg);
   room.players.forEach((_, ws) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    if (ws.readyState === WebSocket.OPEN) {
+      try { ws.send(data); } catch { /* skip broken connections */ }
+    }
   });
 }
 
@@ -78,7 +80,9 @@ function broadcast(room, msg) {
 function broadcastOthers(room, ws, msg) {
   const data = JSON.stringify(msg);
   room.players.forEach((_, other) => {
-    if (other !== ws && other.readyState === WebSocket.OPEN) other.send(data);
+    if (other !== ws && other.readyState === WebSocket.OPEN) {
+      try { other.send(data); } catch { /* skip broken connections */ }
+    }
   });
 }
 
@@ -246,7 +250,11 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (raw) => {
     let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
+    try { msg = JSON.parse(raw); } catch {
+      console.log(`[!] JSON parse error from ${ws.uid}`);
+      ws.send(JSON.stringify({ type: 'error', message: '消息格式错误' }));
+      return;
+    }
 
     switch (msg.type) {
       // ---- 创建房间 ----

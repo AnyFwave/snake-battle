@@ -32,20 +32,23 @@ let killMessages = [];
 function connectWS() {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(WS_URL);
+    let resolved = false;
     socket.onopen = () => {
       $connectionStatus.textContent = '已连接';
       $connectionStatus.className = 'connected';
+      resolved = true;
       resolve(socket);
     };
     socket.onerror = () => {
       $connectionStatus.textContent = '连接失败';
       $connectionStatus.className = 'disconnected';
-      reject(new Error('WebSocket 连接失败'));
+      if (!resolved) reject(new Error('WebSocket 连接失败'));
     };
     socket.onclose = () => {
       $connectionStatus.textContent = '已断开';
       $connectionStatus.className = 'disconnected';
-      if (gameRunning) {
+      // 只有曾经连成功过的 socket 断掉才触发回菜单
+      if (resolved && gameRunning) {
         showToast('与服务器断开连接');
         backToMenu();
       }
@@ -55,53 +58,71 @@ function connectWS() {
 }
 
 // ========== 消息处理 ==========
+let _pendingJoinTimeout = null;
+
 function handleMessage(e) {
-  const msg = JSON.parse(e.data);
+  try {
+    const msg = JSON.parse(e.data);
+    console.log('[WS] ←', msg.type, msg);
 
-  switch (msg.type) {
-    case 'roomCreated':
-      roomId = msg.roomId;
-      showLobby();
-      break;
+    // 收到任何响应都清除加入超时
+    if (_pendingJoinTimeout && (msg.type === 'roomJoined' || msg.type === 'error')) {
+      clearTimeout(_pendingJoinTimeout);
+      _pendingJoinTimeout = null;
+    }
 
-    case 'roomJoined':
-      roomId = msg.roomId;
-      showLobby();
-      break;
+    switch (msg.type) {
+      case 'roomCreated':
+        roomId = msg.roomId;
+        document.getElementById('lobbyRoomId').textContent = roomId;
+        showLobby();
+        break;
 
-    case 'playerList':
-      players = msg.players;
-      renderPlayerList();
-      break;
+      case 'roomJoined':
+        roomId = msg.roomId;
+        document.getElementById('lobbyRoomId').textContent = roomId;
+        showLobby();
+        break;
 
-    case 'playerLeft':
-      players = msg.players;
-      renderPlayerList();
-      break;
+      case 'playerList':
+        players = msg.players;
+        renderPlayerList();
+        break;
 
-    case 'gameStarted':
-      mapSize = msg.mapSize;
-      startGameUI();
-      break;
+      case 'playerLeft':
+        players = msg.players;
+        renderPlayerList();
+        break;
 
-    case 'gameState':
-      players = msg.players;
-      food = msg.food;
-      break;
+      case 'gameStarted':
+        mapSize = msg.mapSize;
+        startGameUI();
+        break;
 
-    case 'playerDied':
-      addKillMessage(`💀 ${msg.name} ${msg.reason}（长度: ${msg.length}, 击杀: ${msg.kills}）`);
-      break;
+      case 'gameState':
+        players = msg.players;
+        food = msg.food;
+        break;
 
-    case 'gameOver':
-      gameRunning = false;
-      cancelAnimationFrame(animFrameId);
-      showResult(msg);
-      break;
+      case 'playerDied':
+        addKillMessage(`💀 ${msg.name} ${msg.reason}（长度: ${msg.length}, 击杀: ${msg.kills}）`);
+        break;
 
-    case 'error':
-      showToast(msg.message);
-      break;
+      case 'gameOver':
+        gameRunning = false;
+        cancelAnimationFrame(animFrameId);
+        showResult(msg);
+        break;
+
+      case 'error':
+        showToast(msg.message);
+        break;
+
+      default:
+        console.log('[WS] unknown type:', msg.type);
+    }
+  } catch (err) {
+    console.error('[WS] handleMessage error:', err, 'raw:', typeof e.data === 'string' ? e.data.substring(0, 300) : e.data);
   }
 }
 
@@ -145,9 +166,13 @@ document.getElementById('btnCreate').addEventListener('click', async () => {
   playerName = name;
 
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    try { ws = await connectWS(); } catch { return; }
+    try { ws = await connectWS(); } catch {
+      showToast('连接服务器失败，请刷新重试');
+      return;
+    }
   }
 
+  console.log('[WS] → createRoom', name);
   ws.send(JSON.stringify({ type: 'createRoom', name }));
 });
 
@@ -159,9 +184,20 @@ document.getElementById('btnJoin').addEventListener('click', async () => {
   playerName = name;
 
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    try { ws = await connectWS(); } catch { return; }
+    try { ws = await connectWS(); } catch {
+      showToast('连接服务器失败，请刷新重试');
+      return;
+    }
   }
 
+  // 5 秒超时：没收到 roomJoined / error 就提示
+  if (_pendingJoinTimeout) clearTimeout(_pendingJoinTimeout);
+  _pendingJoinTimeout = setTimeout(() => {
+    showToast('加入房间超时，请检查房间号是否正确，或刷新页面重试');
+    _pendingJoinTimeout = null;
+  }, 5000);
+
+  console.log('[WS] → joinRoom', rid, name);
   ws.send(JSON.stringify({ type: 'joinRoom', roomId: rid, name }));
 });
 
