@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🐍 Snake Battle Royale</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 主菜单 -->
+    <div id="menu" class="panel">
+      <h1>🐍 贪吃蛇大逃杀</h1>
+      <p class="subtitle">和朋友一起吃吃吃！最后存活的🐍赢！</p>
+
+      <div class="form-group">
+        <label>你的昵称</label>
+        <input id="nameInput" type="text" maxlength="8" placeholder="输入昵称…" />
+      </div>
+
+      <div class="btn-row">
+        <button id="btnCreate" class="btn btn-primary">创建房间</button>
+      </div>
+
+      <div class="divider"><span>或</span></div>
+
+      <div class="form-group">
+        <label>加入房间</label>
+        <div class="join-row">
+          <input id="roomInput" type="text" maxlength="4" placeholder="房间号" />
+          <button id="btnJoin" class="btn btn-secondary">加入</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 房间大厅 -->
+    <div id="lobby" class="panel" style="display:none;">
+      <div class="lobby-header">
+        <h2>🏠 房间大厅</h2>
+      </div>
+
+      <div class="room-info">
+        <p>房间号：<strong id="lobbyRoomId"></strong></p>
+        <p class="hint">把房间号发给朋友，让他们加入！</p>
+      </div>
+
+      <h3>玩家列表</h3>
+      <ul id="playerList"></ul>
+
+      <div class="btn-row">
+        <button id="btnStart" class="btn btn-danger btn-large">开始游戏！</button>
+        <button id="btnLeaveLobby" class="btn btn-secondary">离开</button>
+      </div>
+    </div>
+
+    <!-- 游戏界面 -->
+    <div id="game" style="display:none;">
+      <div id="gameHeader">
+        <span id="aliveCount">存活：0</span>
+        <span id="gameTimer">00:00</span>
+      </div>
+      <canvas id="gameCanvas"></canvas>
+      <div id="gameStatus">
+        <span>WASD / 方向键 控制方向</span>
+      </div>
+      <!-- 击杀日志 -->
+      <div id="killFeed"></div>
+    </div>
+
+    <!-- 结算界面 -->
+    <div id="result" class="panel" style="display:none;">
+      <h1 id="resultTitle"></h1>
+      <div id="winnerInfo"></div>
+      <h3>排行榜</h3>
+      <ol id="rankingList"></ol>
+      <button id="btnBackToMenu" class="btn btn-primary">返回大厅</button>
+    </div>
+
+    <!-- 连接状态 -->
+    <div id="connectionStatus">连接中…</div>
+  </div>
+
+  <script src="client.js"></script>
+</body>
+</html>
