@@ -1,6 +1,6 @@
 const http = require('http');
 const express = require('express');
-const { WebSocketServer } = require('ws');
+const { WebSocketServer, WebSocket } = require('ws');
 
 const app = express();
 app.use(express.static('public'));
@@ -70,7 +70,7 @@ function getPlayer(ws) {
 function broadcast(room, msg) {
   const data = JSON.stringify(msg);
   room.players.forEach((_, ws) => {
-    if (ws.readyState === ws.OPEN) ws.send(data);
+    if (ws.readyState === WebSocket.OPEN) ws.send(data);
   });
 }
 
@@ -78,7 +78,7 @@ function broadcast(room, msg) {
 function broadcastOthers(room, ws, msg) {
   const data = JSON.stringify(msg);
   room.players.forEach((_, other) => {
-    if (other !== ws && other.readyState === other.OPEN) other.send(data);
+    if (other !== ws && other.readyState === WebSocket.OPEN) other.send(data);
   });
 }
 
