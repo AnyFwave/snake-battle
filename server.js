@@ -1,12 +1,33 @@
 const http = require('http');
+const os = require('os');
 const express = require('express');
 const { WebSocketServer, WebSocket } = require('ws');
 
 const app = express();
 app.use(express.static('public'));
 
+// 健康检查端点
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', rooms: Object.keys(rooms || {}).length, uptime: process.uptime() });
+});
+
+// 房间列表（调试用）
+app.get('/rooms', (req, res) => {
+  const roomList = {};
+  const allRooms = rooms || {};
+  for (const rid of Object.keys(allRooms)) {
+    const r = allRooms[rid];
+    roomList[rid] = { state: r.state, players: r.players ? r.players.size : 0, alive: r.alive };
+  }
+  res.json(roomList);
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, pingInterval: 25000 });
+
+// ========== 游戏状态（提前声明，供健康检查端点引用）==========
+let rooms = {};       // { roomId: { players: Map<ws, Player>, state, timer, food } }
+let playerRoom = {};  // ws → roomId 映射
 
 // ========== 游戏常量 ==========
 const MAP_W = 60;          // 地图格子宽
@@ -14,10 +35,6 @@ const MAP_H = 40;          // 地图格子高
 const TICK_RATE = 8;       // 每秒 tick 次数
 const FOOD_MAX = 30;        // 地图上食物数量
 const INITIAL_LENGTH = 4;  // 蛇初始长度
-
-// ========== 游戏状态 ==========
-let rooms = {};       // { roomId: { players: Map<ws, Player>, state, timer, food } }
-let playerRoom = {};  // ws → roomId 映射
 
 // 随机 ID
 function genId(len = 4) {
@@ -248,6 +265,13 @@ wss.on('connection', (ws) => {
   ws.uid = genId(8);
   console.log(`[+] ${ws.uid} 已连接`);
 
+  // 发送服务器信息
+  ws.send(JSON.stringify({
+    type: 'serverInfo',
+    version: '1.0.0',
+    mapSize: { w: MAP_W, h: MAP_H },
+  }));
+
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch {
@@ -257,6 +281,11 @@ wss.on('connection', (ws) => {
     }
 
     switch (msg.type) {
+      // ---- 心跳 ----
+      case 'ping':
+        ws.send(JSON.stringify({ type: 'pong' }));
+        break;
+
       // ---- 创建房间 ----
       case 'createRoom': {
         const roomId = createRoom();
@@ -420,6 +449,19 @@ function handleDisconnect(ws) {
 
 // ========== 启动 ==========
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+const HOST = process.env.HOST || '0.0.0.0';
+server.listen(PORT, HOST, () => {
   console.log(`🐍 Snake Battle Royale 已启动 → http://localhost:${PORT}`);
+  console.log(`   绑定地址: ${HOST}:${PORT}`);
+
+  // 打印局域网 IP，方便手机等设备连接
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      // 跳过内部回环和非 IPv4
+      if (net.family === 'IPv4' && !net.internal) {
+        console.log(`   📡 局域网: http://${net.address}:${PORT}`);
+      }
+    }
+  }
 });

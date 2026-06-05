@@ -8,14 +8,68 @@
 </head>
 <body>
   <div id="app">
-    <!-- 主菜单 -->
+    <!-- 主菜单：模式选择 -->
     <div id="menu" class="panel">
       <h1>🐍 贪吃蛇大逃杀</h1>
-      <p class="subtitle">和朋友一起吃吃吃！最后存活的🐍赢！</p>
+      <p class="subtitle">选择游戏模式</p>
+
+      <div class="mode-cards">
+        <div class="mode-card" data-mode="single">
+          <div class="mode-icon">🎮</div>
+          <h3>单机模式</h3>
+          <p>经典贪吃蛇，挑战最高分</p>
+        </div>
+
+        <div class="mode-card" data-mode="ai">
+          <div class="mode-icon">🤖</div>
+          <h3>人机对战</h3>
+          <p>与 AI 蛇对战，争夺冠军</p>
+        </div>
+
+        <div class="mode-card" data-mode="multiplayer">
+          <div class="mode-icon">🌐</div>
+          <h3>联机对战</h3>
+          <p>邀请朋友一起玩</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 人机配置面板 -->
+    <div id="aiConfig" class="panel" style="display:none;">
+      <h2>🤖 人机对战</h2>
+
+      <div class="form-group">
+        <label>对手数量</label>
+        <div class="btn-group" id="botCountGroup">
+          <button class="btn-group-btn" data-count="3">3</button>
+          <button class="btn-group-btn active" data-count="4">4</button>
+          <button class="btn-group-btn" data-count="5">5</button>
+          <button class="btn-group-btn" data-count="7">7</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>难度</label>
+        <div class="btn-group" id="difficultyGroup">
+          <button class="btn-group-btn" data-diff="easy">简单</button>
+          <button class="btn-group-btn active" data-diff="medium">中等</button>
+          <button class="btn-group-btn" data-diff="hard">困难</button>
+        </div>
+      </div>
+
+      <div class="btn-row" style="margin-top: 24px;">
+        <button id="btnAIStart" class="btn btn-danger btn-large">开始对战</button>
+      </div>
+      <button id="btnAIBack" class="btn btn-secondary" style="width:100%;margin-top:8px;">返回</button>
+    </div>
+
+    <!-- 联机设置面板 -->
+    <div id="multiplayerSetup" class="panel" style="display:none;">
+      <h2>🌐 联机对战</h2>
 
       <div class="form-group">
         <label>你的昵称</label>
-        <input id="nameInput" type="text" maxlength="8" placeholder="输入昵称…" />
+        <input id="mpNameInput" type="text" maxlength="8" placeholder="输入昵称…" />
       </div>
 
       <div class="btn-row">
@@ -31,6 +85,17 @@
           <button id="btnJoin" class="btn btn-secondary">加入</button>
         </div>
       </div>
+
+      <details class="advanced-settings">
+        <summary>⚙️ 高级设置（网桥模式）</summary>
+        <div class="form-group" style="margin-top:12px;">
+          <label>服务器地址</label>
+          <input id="serverUrlInput" type="text" placeholder="例：192.168.1.100:3000" />
+          <p class="hint">如果通过网桥连接，请填写运行服务器的电脑 IP 和端口</p>
+        </div>
+      </details>
+
+      <button id="btnMPBack" class="btn btn-secondary" style="width:100%;margin-top:12px;">返回</button>
     </div>
 
     <!-- 房间大厅 -->
@@ -77,9 +142,15 @@
     </div>
 
     <!-- 连接状态 -->
-    <div id="connectionStatus">连接中…</div>
+    <div id="connectionStatus">未连接</div>
   </div>
 
+  <!-- 脚本加载（依赖顺序） -->
+  <script src="game-engine.js"></script>
+  <script src="ai-player.js"></script>
+  <script src="renderer.js"></script>
+  <script src="single-player.js"></script>
+  <script src="ai-mode.js"></script>
   <script src="client.js"></script>
 </body>
 </html>

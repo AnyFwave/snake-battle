@@ -1,12 +1,24 @@
-// ========== Client: Snake Battle Royale ==========
-const HOST = window.location.host;
-const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${HOST}`;
+// ========== Client: Snake Battle Royale — 联机模式 + 模式路由 ==========
+
+// ---- 可配置的 WebSocket URL ----
+function getWSURL() {
+  const input = document.getElementById('serverUrlInput');
+  const customUrl = input ? input.value.trim() : '';
+  if (customUrl) {
+    const hasProtocol = customUrl.startsWith('ws://') || customUrl.startsWith('wss://');
+    return hasProtocol ? customUrl : `ws://${customUrl}`;
+  }
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${protocol}://${window.location.host}`;
+}
 
 // ========== UI 元素 ==========
 const $menu = document.getElementById('menu');
 const $lobby = document.getElementById('lobby');
 const $game = document.getElementById('game');
 const $result = document.getElementById('result');
+const $aiConfig = document.getElementById('aiConfig');
+const $multiplayerSetup = document.getElementById('multiplayerSetup');
 const $canvas = document.getElementById('gameCanvas');
 const $killFeed = document.getElementById('killFeed');
 const $aliveCount = document.getElementById('aliveCount');
@@ -24,35 +36,123 @@ let food = [];
 let myId = null;
 let gameRunning = false;
 let mapSize = { w: 60, h: 40 };
-let animFrameId = null;
+let mpRenderLoopId = null;
 let gameStartTime = 0;
 let killMessages = [];
+let currentMode = null;          // 'single' | 'ai' | 'multiplayer'
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+
+// ========== 全局面板管理 ==========
+function showPanel(panel) {
+  [$menu, $lobby, $game, $result, $aiConfig, $multiplayerSetup].forEach(p => {
+    if (p) p.style.display = 'none';
+  });
+  panel.style.display = 'block';
+}
+
+function cleanupAll() {
+  // 停止单机模式
+  if (window.SinglePlayerMode && SinglePlayerMode.gameRunning) {
+    SinglePlayerMode.exit();
+  }
+  // 停止人机模式
+  if (window.AIMode && AIMode.gameRunning) {
+    AIMode.exit();
+  }
+  // 停止联机模式
+  gameRunning = false;
+  if (mpRenderLoopId) { cancelAnimationFrame(mpRenderLoopId); mpRenderLoopId = null; }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnectAttempts = 0;
+  players = [];
+  food = [];
+  killMessages = [];
+  $killFeed.innerHTML = '';
+}
+
+// ========== 模式切换 ==========
+function switchMode(mode) {
+  cleanupAll();
+
+  // 从其他模式的游戏面板清理
+  if (ws && mode !== 'multiplayer') {
+    try { ws.close(); } catch {}
+    ws = null;
+    roomId = null;
+    myId = null;
+  }
+
+  currentMode = mode;
+
+  switch (mode) {
+    case 'single':
+      SinglePlayerMode.start();
+      break;
+    case 'ai':
+      AIMode.showConfig();
+      break;
+    case 'multiplayer':
+      showPanel($multiplayerSetup);
+      $connectionStatus.textContent = '已断开';
+      $connectionStatus.className = 'disconnected';
+      break;
+    case 'menu':
+      currentMode = null;
+      showPanel($menu);
+      $connectionStatus.textContent = '未连接';
+      $connectionStatus.className = '';
+      break;
+  }
+}
 
 // ========== 连接 WebSocket ==========
 function connectWS() {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(WS_URL);
+    const url = getWSURL();
+    console.log('[WS] connecting to', url);
+    const socket = new WebSocket(url);
     let resolved = false;
+
     socket.onopen = () => {
       $connectionStatus.textContent = '已连接';
       $connectionStatus.className = 'connected';
       resolved = true;
+      reconnectAttempts = 0; // 连接成功，重置重试计数
       resolve(socket);
     };
+
     socket.onerror = () => {
       $connectionStatus.textContent = '连接失败';
       $connectionStatus.className = 'disconnected';
       if (!resolved) reject(new Error('WebSocket 连接失败'));
     };
+
     socket.onclose = () => {
       $connectionStatus.textContent = '已断开';
       $connectionStatus.className = 'disconnected';
-      // 只有曾经连成功过的 socket 断掉才触发回菜单
-      if (resolved && gameRunning) {
+
+      // 自动重连（仅联机模式 + 已在房间中）
+      if (resolved && currentMode === 'multiplayer' && roomId && reconnectAttempts < 3) {
+        reconnectAttempts++;
+        const delay = 2000 * reconnectAttempts;
+        $connectionStatus.textContent = `重连中(${reconnectAttempts}/3)...`;
+        reconnectTimer = setTimeout(async () => {
+          try {
+            ws = await connectWS();
+            // 重新加入房间
+            ws.send(JSON.stringify({ type: 'joinRoom', roomId, name: playerName }));
+            console.log('[WS] re-joined room', roomId);
+          } catch {
+            $connectionStatus.textContent = '重连失败';
+          }
+        }, delay);
+      } else if (resolved && gameRunning) {
         showToast('与服务器断开连接');
-        backToMenu();
+        switchMode('menu');
       }
     };
+
     socket.onmessage = handleMessage;
   });
 }
@@ -72,16 +172,24 @@ function handleMessage(e) {
     }
 
     switch (msg.type) {
+      case 'serverInfo':
+        console.log('[WS] server info', msg);
+        break;
+
+      case 'pong':
+        // 心跳回复，无需处理
+        break;
+
       case 'roomCreated':
         roomId = msg.roomId;
         document.getElementById('lobbyRoomId').textContent = roomId;
-        showLobby();
+        showPanel($lobby);
         break;
 
       case 'roomJoined':
         roomId = msg.roomId;
         document.getElementById('lobbyRoomId').textContent = roomId;
-        showLobby();
+        showPanel($lobby);
         break;
 
       case 'playerList':
@@ -110,7 +218,7 @@ function handleMessage(e) {
 
       case 'gameOver':
         gameRunning = false;
-        cancelAnimationFrame(animFrameId);
+        if (mpRenderLoopId) { cancelAnimationFrame(mpRenderLoopId); mpRenderLoopId = null; }
         showResult(msg);
         break;
 
@@ -122,119 +230,34 @@ function handleMessage(e) {
         console.log('[WS] unknown type:', msg.type);
     }
   } catch (err) {
-    console.error('[WS] handleMessage error:', err, 'raw:', typeof e.data === 'string' ? e.data.substring(0, 300) : e.data);
+    console.error('[WS] handleMessage error:', err);
   }
 }
 
-// ========== 面板切换 ==========
-function showPanel(panel) {
-  [$menu, $lobby, $game, $result].forEach(p => p.style.display = 'none');
-  panel.style.display = 'block';
-}
+// ========== 联机渲染循环 ==========
+function mpRenderLoop() {
+  if (!gameRunning) return;
 
-function showLobby() {
-  document.getElementById('lobbyRoomId').textContent = roomId;
-  showPanel($lobby);
-}
+  const cellSize = SnakeRenderer.calcCellSize(mapSize.w, mapSize.h);
+  $canvas.width = mapSize.w * cellSize;
+  $canvas.height = mapSize.h * cellSize;
 
-function backToMenu() {
-  gameRunning = false;
-  cancelAnimationFrame(animFrameId);
-  players = [];
-  food = [];
-  roomId = null;
-  myId = null;
-  killMessages = [];
-  $killFeed.innerHTML = '';
-  showPanel($menu);
-}
+  SnakeRenderer.render(ctx, {
+    mapW: mapSize.w,
+    mapH: mapSize.h,
+    players: players,
+    food: food,
+  }, myId, cellSize);
 
-function backToLobby() {
-  gameRunning = false;
-  cancelAnimationFrame(animFrameId);
-  players = [];
-  food = [];
-  killMessages = [];
-  $killFeed.innerHTML = '';
-  showPanel($lobby);
-}
+  // 计时器 & 存活
+  const elapsed = Math.floor((Date.now() - gameStartTime) / 1000);
+  const min = String(Math.floor(elapsed / 60)).padStart(2, '0');
+  const sec = String(elapsed % 60).padStart(2, '0');
+  $gameTimer.textContent = `${min}:${sec}`;
+  const alives = players.filter(p => p.alive).length;
+  $aliveCount.textContent = `存活：${alives}`;
 
-// ========== 按钮事件 ==========
-document.getElementById('btnCreate').addEventListener('click', async () => {
-  const name = document.getElementById('nameInput').value.trim();
-  if (!name) return showToast('请输入昵称');
-  playerName = name;
-
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    try { ws = await connectWS(); } catch {
-      showToast('连接服务器失败，请刷新重试');
-      return;
-    }
-  }
-
-  console.log('[WS] → createRoom', name);
-  ws.send(JSON.stringify({ type: 'createRoom', name }));
-});
-
-document.getElementById('btnJoin').addEventListener('click', async () => {
-  const name = document.getElementById('nameInput').value.trim();
-  const rid = document.getElementById('roomInput').value.trim().toUpperCase();
-  if (!name) return showToast('请输入昵称');
-  if (!rid) return showToast('请输入房间号');
-  playerName = name;
-
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    try { ws = await connectWS(); } catch {
-      showToast('连接服务器失败，请刷新重试');
-      return;
-    }
-  }
-
-  // 5 秒超时：没收到 roomJoined / error 就提示
-  if (_pendingJoinTimeout) clearTimeout(_pendingJoinTimeout);
-  _pendingJoinTimeout = setTimeout(() => {
-    showToast('加入房间超时，请检查房间号是否正确，或刷新页面重试');
-    _pendingJoinTimeout = null;
-  }, 5000);
-
-  console.log('[WS] → joinRoom', rid, name);
-  ws.send(JSON.stringify({ type: 'joinRoom', roomId: rid, name }));
-});
-
-document.getElementById('btnStart').addEventListener('click', () => {
-  ws.send(JSON.stringify({ type: 'startGame' }));
-});
-
-document.getElementById('btnLeaveLobby').addEventListener('click', () => {
-  backToMenu();
-  // 重新连接以离开当前房间
-  if (ws) ws.close();
-  ws = null;
-});
-
-document.getElementById('btnBackToMenu').addEventListener('click', () => {
-  showLobby(); // 留在房间里可以继续下一局
-});
-
-// ========== Toast ==========
-function showToast(message) {
-  const toast = document.createElement('div');
-  toast.className = 'toast';
-  toast.textContent = message;
-  document.body.appendChild(toast);
-  setTimeout(() => toast.remove(), 3000);
-}
-
-// ========== 玩家列表 ==========
-function renderPlayerList() {
-  const list = document.getElementById('playerList');
-  list.innerHTML = players.map(p => `
-    <li>
-      <span class="player-dot" style="background:${p.color}"></span>
-      <span class="player-name">${p.name}</span>
-      ${p.id === myId ? '<span class="player-tag">你</span>' : ''}
-    </li>
-  `).join('');
+  mpRenderLoopId = requestAnimationFrame(mpRenderLoop);
 }
 
 // ========== 游戏界面 ==========
@@ -249,144 +272,87 @@ function startGameUI() {
   if (me) myId = me.id;
 
   // 设置画布大小
-  const cellSize = calcCellSize();
+  const cellSize = SnakeRenderer.calcCellSize(mapSize.w, mapSize.h);
   $canvas.width = mapSize.w * cellSize;
   $canvas.height = mapSize.h * cellSize;
 
   showPanel($game);
-  gameLoop();
+  mpRenderLoop();
 }
 
-function calcCellSize() {
-  const maxW = Math.min(window.innerWidth - 40, 700);
-  const maxH = Math.min(window.innerHeight - 160, 500);
-  return Math.floor(Math.min(maxW / mapSize.w, maxH / mapSize.h));
+function showLobby() {
+  document.getElementById('lobbyRoomId').textContent = roomId;
+  showPanel($lobby);
 }
 
-// ========== 渲染 ==========
-function gameLoop() {
-  if (!gameRunning) return;
+function showResult(msg) {
+  const titleEl = document.getElementById('resultTitle');
+  const winnerEl = document.getElementById('winnerInfo');
+  const rankingEl = document.getElementById('rankingList');
 
-  const cellSize = calcCellSize();
-  $canvas.width = mapSize.w * cellSize;
-  $canvas.height = mapSize.h * cellSize;
-  ctx.clearRect(0, 0, $canvas.width, $canvas.height);
-
-  // 背景网格
-  ctx.fillStyle = '#0d0d25';
-  ctx.fillRect(0, 0, $canvas.width, $canvas.height);
-  ctx.strokeStyle = '#111133';
-  ctx.lineWidth = 0.5;
-  for (let x = 0; x <= mapSize.w; x++) {
-    ctx.beginPath();
-    ctx.moveTo(x * cellSize, 0);
-    ctx.lineTo(x * cellSize, mapSize.h * cellSize);
-    ctx.stroke();
-  }
-  for (let y = 0; y <= mapSize.h; y++) {
-    ctx.beginPath();
-    ctx.moveTo(0, y * cellSize);
-    ctx.lineTo(mapSize.w * cellSize, y * cellSize);
-    ctx.stroke();
+  if (msg.winner) {
+    titleEl.textContent = '🏆 游戏结束！';
+    winnerEl.innerHTML = `
+      <p>冠军：<strong style="color:#ffd700;">${msg.winner.name}</strong></p>
+      <p>长度：${msg.winner.length} | 击杀：${msg.winner.kills}</p>
+    `;
+  } else {
+    titleEl.textContent = '🤝 平局！';
+    winnerEl.innerHTML = '<p>所有玩家同时出局</p>';
   }
 
-  // 食物
-  food.forEach(f => {
-    const cx = f.x * cellSize + cellSize / 2;
-    const cy = f.y * cellSize + cellSize / 2;
-    ctx.fillStyle = f.color;
-    ctx.beginPath();
-    ctx.arc(cx, cy, cellSize * 0.35, 0, Math.PI * 2);
-    ctx.fill();
-    // 光晕
-    ctx.fillStyle = 'rgba(255,255,255,0.3)';
-    ctx.beginPath();
-    ctx.arc(cx, cy, cellSize * 0.15, 0, Math.PI * 2);
-    ctx.fill();
-  });
+  rankingEl.innerHTML = msg.ranking.map((r, i) => `
+    <li>
+      <span class="rank-name">#${i + 1} ${r.name} ${r.alive ? '👑' : '💀'}</span>
+      <span class="rank-stats">长度 ${r.length} | 击杀 ${r.kills}</span>
+    </li>
+  `).join('');
 
-  // 蛇
-  players.forEach(p => {
-    if (!p.segments || p.segments.length === 0) return;
-    const isMe = p.id === myId;
-    const alpha = p.alive ? 1 : 0.3;
+  // 恢复按钮
+  const btnBack = document.getElementById('btnBackToMenu');
+  btnBack.textContent = '返回大厅';
+  btnBack.onclick = () => {
+    $result.style.display = 'none';
+    showLobby();
+  };
+  const btn2 = document.getElementById('btnBackToMenu2');
+  if (btn2) btn2.remove();
 
-    p.segments.forEach((seg, i) => {
-      const x = seg.x * cellSize;
-      const y = seg.y * cellSize;
-      const pad = 1;
-
-      ctx.globalAlpha = alpha;
-
-      if (i === 0) {
-        // 蛇头 — 圆角方形
-        ctx.fillStyle = isMe ? '#fff' : p.color;
-        roundRect(x + pad, y + pad, cellSize - pad * 2, cellSize - pad * 2, 4);
-        ctx.fill();
-
-        // 眼睛
-        ctx.fillStyle = p.alive ? '#000' : '#666';
-        const eyeR = cellSize * 0.1;
-        const cx = x + cellSize / 2;
-        const cy = y + cellSize / 2;
-        ctx.beginPath();
-        ctx.arc(cx - cellSize * 0.2, cy - cellSize * 0.1, eyeR, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(cx + cellSize * 0.2, cy - cellSize * 0.1, eyeR, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        // 身体
-        const ratio = 1 - (i / p.segments.length) * 0.4;
-        ctx.fillStyle = isMe ? `rgba(200,200,255,${ratio})` : adjustAlpha(p.color, ratio);
-        roundRect(x + pad, y + pad, cellSize - pad * 2, cellSize - pad * 2, 3);
-        ctx.fill();
-      }
-
-      ctx.globalAlpha = 1;
-
-      // 自己蛇的边框
-      if (isMe && p.alive) {
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 1.5;
-        roundRect(x + pad, y + pad, cellSize - pad * 2, cellSize - pad * 2, 4);
-        ctx.stroke();
-      }
-    });
-
-    // 死亡蛇的 X
-    if (!p.alive && p.segments.length > 0) {
-      const hx = p.segments[0].x * cellSize + cellSize / 2;
-      const hy = p.segments[0].y * cellSize + cellSize / 2;
-      const s = cellSize * 0.3;
-      ctx.strokeStyle = '#f44';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(hx - s, hy - s);
-      ctx.lineTo(hx + s, hy + s);
-      ctx.moveTo(hx + s, hy - s);
-      ctx.lineTo(hx - s, hy + s);
-      ctx.stroke();
-    }
-  });
-
-  // 计时器 & 存活
-  if (gameRunning) {
-    const elapsed = Math.floor((Date.now() - gameStartTime) / 1000);
-    const min = String(Math.floor(elapsed / 60)).padStart(2, '0');
-    const sec = String(elapsed % 60).padStart(2, '0');
-    $gameTimer.textContent = `${min}:${sec}`;
-    const alives = players.filter(p => p.alive).length;
-    $aliveCount.textContent = `存活：${alives}`;
-  }
-
-  animFrameId = requestAnimationFrame(gameLoop);
+  showPanel($result);
 }
 
-// ========== 键盘输入 ==========
+// ========== 玩家列表 ==========
+function renderPlayerList() {
+  const list = document.getElementById('playerList');
+  list.innerHTML = players.map(p => `
+    <li>
+      <span class="player-dot" style="background:${p.color}"></span>
+      <span class="player-name">${p.name}</span>
+      ${p.id === myId ? '<span class="player-tag">你</span>' : ''}
+    </li>
+  `).join('');
+}
+
+// ========== Toast ==========
+function showToast(message) {
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 3000);
+}
+
+// ========== 击杀日志 ==========
+function addKillMessage(text) {
+  killMessages.push(text);
+  if (killMessages.length > 20) killMessages.shift();
+  $killFeed.innerHTML = killMessages.map(m => `<div class="kill-msg">${m}</div>`).join('');
+  $killFeed.scrollTop = $killFeed.scrollHeight;
+}
+
+// ========== 键盘输入（全局，按模式分发）==========
 document.addEventListener('keydown', (e) => {
-  if (!gameRunning) return;
-
+  // 只处理方向键
   let dir = null;
   switch (e.key.toLowerCase()) {
     case 'w':
@@ -398,84 +364,131 @@ document.addEventListener('keydown', (e) => {
     case 'd':
     case 'arrowright': dir = { x: 1, y: 0 };  break;
   }
+  if (!dir) return;
 
-  if (dir && ws && ws.readyState === WebSocket.OPEN) {
+  // 阻止页面滚动
+  if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd'].includes(
+    e.key.toLowerCase())) {
     e.preventDefault();
+  }
+
+  // 根据活跃模式分发方向
+  if (currentMode === 'single' && SinglePlayerMode.engine) {
+    SinglePlayerMode.engine.setDirection(SinglePlayerMode.myPlayerIndex, dir);
+  } else if (currentMode === 'ai' && AIMode.engine) {
+    AIMode.engine.setDirection(AIMode.myPlayerIndex, dir);
+  } else if (currentMode === 'multiplayer' && gameRunning && ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'changeDir', dir }));
   }
 });
 
-// ========== 击杀日志 ==========
-function addKillMessage(text) {
-  killMessages.push(text);
-  if (killMessages.length > 20) killMessages.shift();
-  $killFeed.innerHTML = killMessages.map(m => `<div class="kill-msg">${m}</div>`).join('');
-  $killFeed.scrollTop = $killFeed.scrollHeight;
-}
+// ========== 联机按钮事件 ==========
+document.getElementById('btnCreate').addEventListener('click', async () => {
+  const name = document.getElementById('mpNameInput').value.trim();
+  if (!name) return showToast('请输入昵称');
+  playerName = name;
 
-// ========== 结算 ==========
-function showResult(msg) {
-  const title = document.getElementById('resultTitle');
-  const winnerInfo = document.getElementById('winnerInfo');
-  const rankingList = document.getElementById('rankingList');
-
-  if (msg.winner) {
-    title.textContent = '🏆 游戏结束！';
-    winnerInfo.innerHTML = `
-      <p>冠军：<strong style="color:#ffd700;">${msg.winner.name}</strong></p>
-      <p>长度：${msg.winner.length} | 击杀：${msg.winner.kills}</p>
-    `;
-  } else {
-    title.textContent = '🤝 平局！';
-    winnerInfo.innerHTML = '<p>所有玩家同时出局</p>';
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    try { ws = await connectWS(); } catch {
+      showToast('连接服务器失败，请检查服务器地址或刷新重试');
+      return;
+    }
   }
 
-  rankingList.innerHTML = msg.ranking.map((r, i) => `
-    <li>
-      <span class="rank-name">#${i + 1} ${r.name} ${r.alive ? '👑' : '💀'}</span>
-      <span class="rank-stats">长度 ${r.length} | 击杀 ${r.kills}</span>
-    </li>
-  `).join('');
+  console.log('[WS] → createRoom', name);
+  ws.send(JSON.stringify({ type: 'createRoom', name }));
+});
 
-  showPanel($result);
-}
+document.getElementById('btnJoin').addEventListener('click', async () => {
+  const name = document.getElementById('mpNameInput').value.trim();
+  const rid = document.getElementById('roomInput').value.trim().toUpperCase();
+  if (!name) return showToast('请输入昵称');
+  if (!rid) return showToast('请输入房间号');
+  playerName = name;
 
-// ========== 工具函数 ==========
-function roundRect(x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
-}
-
-// 解析 hsl 颜色并修改 alpha
-function adjustAlpha(hsl, alpha) {
-  const match = hsl.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
-  if (match) {
-    return `hsla(${match[1]}, ${match[2]}%, ${match[3]}%, ${alpha})`;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    try { ws = await connectWS(); } catch {
+      showToast('连接服务器失败，请检查服务器地址或刷新重试');
+      return;
+    }
   }
-  return hsl;
-}
 
-// ========== 初始化 ==========
-async function init() {
-  try { ws = await connectWS(); } catch { /* 用户操作时再连 */ }
-}
+  if (_pendingJoinTimeout) clearTimeout(_pendingJoinTimeout);
+  _pendingJoinTimeout = setTimeout(() => {
+    showToast('加入房间超时，请检查房间号是否正确，或刷新页面重试');
+    _pendingJoinTimeout = null;
+  }, 5000);
 
-init();
+  console.log('[WS] → joinRoom', rid, name);
+  ws.send(JSON.stringify({ type: 'joinRoom', roomId: rid, name }));
+});
 
-// 窗口大小变化时重设画布
+document.getElementById('btnMPBack').addEventListener('click', () => {
+  switchMode('menu');
+});
+
+document.getElementById('btnStart').addEventListener('click', () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'startGame' }));
+  }
+});
+
+document.getElementById('btnLeaveLobby').addEventListener('click', () => {
+  if (ws) { try { ws.close(); } catch {} }
+  ws = null;
+  roomId = null;
+  myId = null;
+  players = [];
+  switchMode('menu');
+});
+
+// ========== 模式选择卡片事件 ==========
+document.querySelectorAll('.mode-card').forEach(card => {
+  card.addEventListener('click', () => {
+    const mode = card.dataset.mode;
+    switchMode(mode);
+  });
+});
+
+// ========== 人机配置面板事件 ==========
+// 对手数量选择
+document.querySelectorAll('#botCountGroup .btn-group-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#botCountGroup .btn-group-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+
+// 难度选择
+document.querySelectorAll('#difficultyGroup .btn-group-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#difficultyGroup .btn-group-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+
+document.getElementById('btnAIStart').addEventListener('click', () => {
+  const countBtn = document.querySelector('#botCountGroup .btn-group-btn.active');
+  const diffBtn = document.querySelector('#difficultyGroup .btn-group-btn.active');
+  const botCount = parseInt(countBtn ? countBtn.dataset.count : 4);
+  const difficulty = diffBtn ? diffBtn.dataset.diff : 'medium';
+  $aiConfig.style.display = 'none';
+  AIMode.start(botCount, difficulty);
+  currentMode = 'ai';
+});
+
+document.getElementById('btnAIBack').addEventListener('click', () => {
+  switchMode('menu');
+});
+
+// ========== 窗口大小变化 ==========
 window.addEventListener('resize', () => {
-  if (gameRunning) {
-    const cs = calcCellSize();
-    $canvas.width = mapSize.w * cs;
-    $canvas.height = mapSize.h * cs;
+  if (gameRunning || (currentMode === 'single' && SinglePlayerMode.gameRunning) ||
+      (currentMode === 'ai' && AIMode.gameRunning)) {
+    const mw = currentMode === 'multiplayer' ? mapSize.w : 60;
+    const mh = currentMode === 'multiplayer' ? mapSize.h : 40;
+    const cs = SnakeRenderer.calcCellSize(mw, mh);
+    $canvas.width = mw * cs;
+    $canvas.height = mh * cs;
   }
 });
